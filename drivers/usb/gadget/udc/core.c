@@ -106,6 +106,17 @@ int usb_ep_enable(struct usb_ep *ep)
 	if (ep->enabled)
 		goto out;
 
+	/* UDC drivers can't handle endpoints with maxpacket size 0 */
+	if (usb_endpoint_maxp(ep->desc) == 0) {
+		/*
+		 * We should log an error message here, but we can't call
+		 * dev_err() because there's no way to find the gadget
+		 * given only ep.
+		 */
+		ret = -EINVAL;
+		goto out;
+	}
+
 	ret = ep->ops->enable(ep, ep->desc);
 	if (ret)
 		goto out;
@@ -708,57 +719,6 @@ out:
 EXPORT_SYMBOL_GPL(usb_gadget_disconnect);
 
 /**
- * usb_gsi_ep_op - performs operation on GSI accelerated EP based on EP op code
- *
- * Operations such as EP configuration, TRB allocation, StartXfer etc.
- * See gsi_ep_op for more details.
- */
-int usb_gsi_ep_op(struct usb_ep *ep,
-		struct usb_gsi_request *req, enum gsi_ep_op op)
-{
-	if (ep->ops->gsi_ep_op)
-		return ep->ops->gsi_ep_op(ep, req, op);
-
-	return -EOPNOTSUPP;
-}
-EXPORT_SYMBOL(usb_gsi_ep_op);
-
-/**
- * usb_gadget_func_wakeup - send a function remote wakeup up notification
- * to the host connected to this gadget
- * @gadget: controller used to wake up the host
- * @interface_id: the interface which triggered the remote wakeup event
- *
- * Returns zero on success. Otherwise, negative error code is returned.
- */
-int usb_gadget_func_wakeup(struct usb_gadget *gadget,
-	int interface_id)
-{
-	if (gadget->speed != USB_SPEED_SUPER)
-		return -EOPNOTSUPP;
-
-	if (!gadget->ops->func_wakeup)
-		return -EOPNOTSUPP;
-
-	return gadget->ops->func_wakeup(gadget, interface_id);
-}
-EXPORT_SYMBOL(usb_gadget_func_wakeup);
-
-/**
- * usb_gadget_restart - software-controlled reset of USB peripheral connection
- * @gadget:the peripheral being reset
- *
- * Informs controller driver for Vbus LOW followed by Vbus HIGH notification.
- * This performs full hardware reset and re-initialization.
-  */
-int usb_gadget_restart(struct usb_gadget *gadget)
-{
-	if (!gadget->ops->restart)
-		return -EOPNOTSUPP;
-	return gadget->ops->restart(gadget);
-}
-EXPORT_SYMBOL(usb_gadget_restart);
-/**
  * usb_gadget_deactivate - deactivate function which is not ready to work
  * @gadget: the peripheral being deactivated
  *
@@ -857,6 +817,8 @@ int usb_gadget_map_request_by_dev(struct device *dev,
 			dev_err(dev, "failed to map buffer\n");
 			return -EFAULT;
 		}
+
+		req->dma_mapped = 1;
 	}
 
 	return 0;
@@ -881,9 +843,10 @@ void usb_gadget_unmap_request_by_dev(struct device *dev,
 				is_in ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
 
 		req->num_mapped_sgs = 0;
-	} else if (req->dma != DMA_ERROR_CODE) {
+	} else if (req->dma_mapped) {
 		dma_unmap_single(dev, req->dma, req->length,
 				is_in ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
+		req->dma_mapped = 0;
 	}
 }
 EXPORT_SYMBOL_GPL(usb_gadget_unmap_request_by_dev);
@@ -1173,10 +1136,6 @@ int usb_add_gadget_udc_release(struct device *parent, struct usb_gadget *gadget,
 	INIT_WORK(&gadget->work, usb_gadget_state_work);
 	gadget->dev.parent = parent;
 
-	dma_set_coherent_mask(&gadget->dev, parent->coherent_dma_mask);
-	gadget->dev.dma_parms = parent->dma_parms;
-	gadget->dev.dma_mask = parent->dma_mask;
-
 	if (release)
 		gadget->dev.release = release;
 	else
@@ -1294,7 +1253,6 @@ static void usb_gadget_remove_driver(struct usb_udc *udc)
 	usb_gadget_udc_stop(udc);
 
 	udc->driver = NULL;
-	udc->dev.driver = NULL;
 	udc->gadget->dev.driver = NULL;
 }
 
@@ -1342,7 +1300,6 @@ static int udc_bind_to_driver(struct usb_udc *udc, struct usb_gadget_driver *dri
 			driver->function);
 
 	udc->driver = driver;
-	udc->dev.driver = &driver->driver;
 	udc->gadget->dev.driver = &driver->driver;
 
 	ret = driver->bind(udc->gadget, driver);
@@ -1362,7 +1319,6 @@ err1:
 		dev_err(&udc->dev, "failed to start %s: %d\n",
 			udc->driver->function, ret);
 	udc->driver = NULL;
-	udc->dev.driver = NULL;
 	udc->gadget->dev.driver = NULL;
 	return ret;
 }
@@ -1465,10 +1421,13 @@ static ssize_t usb_udc_softconn_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t n)
 {
 	struct usb_udc		*udc = container_of(dev, struct usb_udc, dev);
+	ssize_t			ret;
 
+	mutex_lock(&udc_lock);
 	if (!udc->driver) {
 		dev_err(dev, "soft-connect without a gadget driver\n");
-		return -EOPNOTSUPP;
+		ret = -EOPNOTSUPP;
+		goto out;
 	}
 
 	if (sysfs_streq(buf, "connect")) {
@@ -1480,10 +1439,14 @@ static ssize_t usb_udc_softconn_store(struct device *dev,
 		usb_gadget_udc_stop(udc);
 	} else {
 		dev_err(dev, "unsupported command '%s'\n", buf);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out;
 	}
 
-	return n;
+	ret = n;
+out:
+	mutex_unlock(&udc_lock);
+	return ret;
 }
 static DEVICE_ATTR(soft_connect, S_IWUSR, NULL, usb_udc_softconn_store);
 

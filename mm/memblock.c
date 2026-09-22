@@ -19,9 +19,6 @@
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
 #include <linux/memblock.h>
-#include <linux/preempt.h>
-#include <linux/seqlock.h>
-#include <linux/irqflags.h>
 
 #include <asm/sections.h>
 #include <linux/io.h>
@@ -34,7 +31,6 @@ static struct memblock_region memblock_reserved_init_regions[INIT_MEMBLOCK_REGIO
 static struct memblock_region memblock_physmem_init_regions[INIT_PHYSMEM_REGIONS] __initdata_memblock;
 #endif
 
-static seqcount_t memblock_seq;
 struct memblock memblock __initdata_memblock = {
 	.memory.regions		= memblock_memory_init_regions,
 	.memory.cnt		= 1,	/* empty dummy entry */
@@ -190,14 +186,6 @@ __memblock_find_range_top_down(phys_addr_t start, phys_addr_t end,
  *
  * Find @size free area aligned to @align in the specified range and node.
  *
- * When allocation direction is bottom-up, the @start should be greater
- * than the end of the kernel image. Otherwise, it will be trimmed. The
- * reason is that we want the bottom-up allocation just near the kernel
- * image so it is highly likely that the allocated memory and the kernel
- * will reside in the same node.
- *
- * If bottom-up allocation failed, will try to allocate memory top-down.
- *
  * RETURNS:
  * Found address on success, 0 on failure.
  */
@@ -205,8 +193,6 @@ phys_addr_t __init_memblock memblock_find_in_range_node(phys_addr_t size,
 					phys_addr_t align, phys_addr_t start,
 					phys_addr_t end, int nid, ulong flags)
 {
-	phys_addr_t kernel_end, ret;
-
 	/* pump up @end */
 	if (end == MEMBLOCK_ALLOC_ACCESSIBLE)
 		end = memblock.current_limit;
@@ -214,39 +200,13 @@ phys_addr_t __init_memblock memblock_find_in_range_node(phys_addr_t size,
 	/* avoid allocating the first page */
 	start = max_t(phys_addr_t, start, PAGE_SIZE);
 	end = max(start, end);
-	kernel_end = __pa_symbol(_end);
 
-	/*
-	 * try bottom-up allocation only when bottom-up mode
-	 * is set and @end is above the kernel image.
-	 */
-	if (memblock_bottom_up() && end > kernel_end) {
-		phys_addr_t bottom_up_start;
-
-		/* make sure we will allocate above the kernel */
-		bottom_up_start = max(start, kernel_end);
-
-		/* ok, try bottom-up allocation first */
-		ret = __memblock_find_range_bottom_up(bottom_up_start, end,
-						      size, align, nid, flags);
-		if (ret)
-			return ret;
-
-		/*
-		 * we always limit bottom-up allocation above the kernel,
-		 * but top-down allocation doesn't have the limit, so
-		 * retrying top-down allocation may succeed when bottom-up
-		 * allocation failed.
-		 *
-		 * bottom-up allocation is expected to be fail very rarely,
-		 * so we use WARN_ONCE() here to see the stack trace if
-		 * fail happens.
-		 */
-		WARN_ONCE(1, "memblock: bottom-up allocation failed, memory hotunplug may be affected\n");
-	}
-
-	return __memblock_find_range_top_down(start, end, size, align, nid,
-					      flags);
+	if (memblock_bottom_up())
+		return __memblock_find_range_bottom_up(start, end, size, align,
+						       nid, flags);
+	else
+		return __memblock_find_range_top_down(start, end, size, align,
+						      nid, flags);
 }
 
 /**
@@ -312,14 +272,20 @@ void __init memblock_discard(void)
 		addr = __pa(memblock.reserved.regions);
 		size = PAGE_ALIGN(sizeof(struct memblock_region) *
 				  memblock.reserved.max);
-		__memblock_free_late(addr, size);
+		if (memblock_reserved_in_slab)
+			kfree(memblock.reserved.regions);
+		else
+			__memblock_free_late(addr, size);
 	}
 
 	if (memblock.memory.regions != memblock_memory_init_regions) {
 		addr = __pa(memblock.memory.regions);
 		size = PAGE_ALIGN(sizeof(struct memblock_region) *
 				  memblock.memory.max);
-		__memblock_free_late(addr, size);
+		if (memblock_memory_in_slab)
+			kfree(memblock.memory.regions);
+		else
+			__memblock_free_late(addr, size);
 	}
 }
 #endif
@@ -723,8 +689,7 @@ int __init_memblock memblock_free(phys_addr_t base, phys_addr_t size)
 		     (unsigned long long)base + size - 1,
 		     (void *)_RET_IP_);
 
-	if (base < memblock.current_limit)
-		kmemleak_free_part_phys(base, size);
+	kmemleak_free_part_phys(base, size);
 	return memblock_remove_range(&memblock.reserved, base, size);
 }
 
@@ -1153,8 +1118,7 @@ static phys_addr_t __init memblock_alloc_range_nid(phys_addr_t size,
 		 * The min_count is set to 0 so that memblock allocations are
 		 * never reported as leaks.
 		 */
-		if (found < memblock.current_limit)
-			kmemleak_alloc_phys(found, size, 0, 0);
+		kmemleak_alloc_phys(found, size, 0, 0);
 		return found;
 	}
 	return 0;
@@ -1546,8 +1510,7 @@ void __init memblock_mem_limit_remove_map(phys_addr_t limit)
 			      (phys_addr_t)ULLONG_MAX);
 }
 
-static int __init_memblock __memblock_search(struct memblock_type *type,
-					     phys_addr_t addr)
+static int __init_memblock memblock_search(struct memblock_type *type, phys_addr_t addr)
 {
 	unsigned int left = 0, right = type->cnt;
 
@@ -1563,20 +1526,6 @@ static int __init_memblock __memblock_search(struct memblock_type *type,
 			return mid;
 	} while (left < right);
 	return -1;
-}
-
-static int __init_memblock memblock_search(struct memblock_type *type,
-					   phys_addr_t addr)
-{
-	int ret;
-	unsigned long seq;
-
-	do {
-		seq = raw_read_seqcount_begin(&memblock_seq);
-		ret = __memblock_search(type, addr);
-	} while (unlikely(read_seqcount_retry(&memblock_seq, seq)));
-
-	return ret;
 }
 
 bool __init memblock_is_reserved(phys_addr_t addr)
@@ -1635,14 +1584,6 @@ int __init_memblock memblock_is_region_memory(phys_addr_t base, phys_addr_t size
 	return memblock.memory.regions[idx].base <= base &&
 		(memblock.memory.regions[idx].base +
 		 memblock.memory.regions[idx].size) >= end;
-}
-
-bool __init_memblock memblock_overlaps_memory(phys_addr_t base,
-					      phys_addr_t size)
-{
-	memblock_cap_size(base, &size);
-
-	return memblock_overlaps_region(&memblock.memory, base, size);
 }
 
 /**
@@ -1758,37 +1699,6 @@ void __init_memblock __memblock_dump_all(void)
 void __init memblock_allow_resize(void)
 {
 	memblock_can_resize = 1;
-}
-
-static unsigned long __init_memblock
-memblock_resize_late(int begin, unsigned long flags)
-{
-	static int memblock_can_resize_old;
-
-	if (begin) {
-		preempt_disable();
-		local_irq_save(flags);
-		memblock_can_resize_old = memblock_can_resize;
-		memblock_can_resize = 0;
-		raw_write_seqcount_begin(&memblock_seq);
-	} else {
-		raw_write_seqcount_end(&memblock_seq);
-		memblock_can_resize = memblock_can_resize_old;
-		local_irq_restore(flags);
-		preempt_enable();
-	}
-
-	return flags;
-}
-
-unsigned long __init_memblock memblock_region_resize_late_begin(void)
-{
-	return memblock_resize_late(1, 0);
-}
-
-void __init_memblock memblock_region_resize_late_end(unsigned long flags)
-{
-	memblock_resize_late(0, flags);
 }
 
 static int __init early_memblock(char *p)

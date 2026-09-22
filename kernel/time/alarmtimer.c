@@ -8,7 +8,6 @@
  * interface.
  *
  * Copyright (C) 2010 IBM Corperation
- * Copyright (C) 2019 XiaoMi, Inc.
  *
  * Author: John Stultz <john.stultz@linaro.org>
  *
@@ -16,7 +15,6 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
-#define ENABLE_ALARMTIMER_RECORD
 #include <linux/time.h>
 #include <linux/hrtimer.h>
 #include <linux/timerqueue.h>
@@ -27,22 +25,6 @@
 #include <linux/posix-timers.h>
 #include <linux/workqueue.h>
 #include <linux/freezer.h>
-#ifdef ENABLE_ALARMTIMER_RECORD
-#include <linux/proc_fs.h>
-#include <linux/slab.h>
-
-#define ALARMTIMER_RECORD_MAX	500
-static DEFINE_SPINLOCK(alarmtimer_lock);
-struct alarmtimer_record_buff {
-	char alarmtimer_set_msg[250];
-	struct timespec alarmtimer_set_time;
-};
-
-static struct alarmtimer_record_buff alarmtimer_set_record_buff[ALARMTIMER_RECORD_MAX];
-static u32 alarmtimer_num;
-static u32 index_head;
-static u32 index_tail;
-#endif
 
 /**
  * struct alarm_base - Alarm timer bases
@@ -69,51 +51,7 @@ static struct wakeup_source *ws;
 static struct rtc_timer		rtctimer;
 static struct rtc_device	*rtcdev;
 static DEFINE_SPINLOCK(rtcdev_lock);
-bool alarm_fired;
 
-#ifdef ENABLE_ALARMTIMER_RECORD
-static void alarmtimer_collect(struct alarm *alarm)
-{
-	static int m;
-	char alarmtimer_creator[30] = {0};
-
-	if (!spin_trylock(&alarmtimer_lock))
-		return;
-
-	snprintf(alarmtimer_creator, sizeof(alarmtimer_creator), "%s", current->comm);
-	index_tail = m;
-	pr_info("Alarmtimer { %s', '%llu'}\n", alarmtimer_creator, ktime_to_ms(alarm->node.expires));
-	getnstimeofday(&alarmtimer_set_record_buff[m].alarmtimer_set_time);
-	sprintf(alarmtimer_set_record_buff[m++].alarmtimer_set_msg, "%s, %llu", alarmtimer_creator, ktime_to_ms(alarm->node.expires));
-
-	if (m >= ALARMTIMER_RECORD_MAX) {
-		m = 0;
-	}
-
-	alarmtimer_num++;
-	if (alarmtimer_num >= ALARMTIMER_RECORD_MAX) {
-		alarmtimer_num = ALARMTIMER_RECORD_MAX;
-		index_head = index_tail + 1;
-		if (index_head >= ALARMTIMER_RECORD_MAX)
-			index_head = 0;
-	}
-
-	spin_unlock(&alarmtimer_lock);
-}
-#endif
-
-static void alarmtimer_triggered_func(void *p)
-{
-	struct rtc_device *rtc = rtcdev;
-
-	if (!(rtc->irq_data & RTC_AF))
-		return;
-	__pm_wakeup_event(ws, 2 * MSEC_PER_SEC);
-}
-
-static struct rtc_task alarmtimer_rtc_task = {
-	.func = alarmtimer_triggered_func
-};
 /**
  * alarmtimer_get_rtcdev - Return selected rtcdevice
  *
@@ -124,7 +62,7 @@ static struct rtc_task alarmtimer_rtc_task = {
 struct rtc_device *alarmtimer_get_rtcdev(void)
 {
 	unsigned long flags;
-	struct rtc_device *ret = NULL;
+	struct rtc_device *ret;
 
 	spin_lock_irqsave(&rtcdev_lock, flags);
 	ret = rtcdev;
@@ -138,36 +76,24 @@ static int alarmtimer_rtc_add_device(struct device *dev,
 				struct class_interface *class_intf)
 {
 	unsigned long flags;
-	int err = 0;
 	struct rtc_device *rtc = to_rtc_device(dev);
+
 	if (rtcdev)
 		return -EBUSY;
+
 	if (!rtc->ops->set_alarm)
+		return -1;
+	if (!device_may_wakeup(rtc->dev.parent))
 		return -1;
 
 	spin_lock_irqsave(&rtcdev_lock, flags);
 	if (!rtcdev) {
-		err = rtc_irq_register(rtc, &alarmtimer_rtc_task);
-		if (err)
-			goto rtc_irq_reg_err;
 		rtcdev = rtc;
 		/* hold a reference so it doesn't go away */
 		get_device(dev);
 	}
-
-rtc_irq_reg_err:
 	spin_unlock_irqrestore(&rtcdev_lock, flags);
-	return err;
-
-}
-
-static void alarmtimer_rtc_remove_device(struct device *dev,
-				struct class_interface *class_intf)
-{
-	if (rtcdev && dev == &rtcdev->dev) {
-		rtc_irq_unregister(rtcdev, &alarmtimer_rtc_task);
-		rtcdev = NULL;
-	}
+	return 0;
 }
 
 static inline void alarmtimer_rtc_timer_init(void)
@@ -177,7 +103,6 @@ static inline void alarmtimer_rtc_timer_init(void)
 
 static struct class_interface alarmtimer_rtc_interface = {
 	.add_dev = &alarmtimer_rtc_add_device,
-	.remove_dev = &alarmtimer_rtc_remove_device,
 };
 
 static int alarmtimer_rtc_interface_setup(void)
@@ -214,9 +139,6 @@ static void alarmtimer_enqueue(struct alarm_base *base, struct alarm *alarm)
 	if (alarm->state & ALARMTIMER_STATE_ENQUEUED)
 		timerqueue_del(&base->timerqueue, &alarm->node);
 
-#ifdef ENABLE_ALARMTIMER_RECORD
-	alarmtimer_collect(alarm);
-#endif
 	timerqueue_add(&base->timerqueue, &alarm->node);
 	alarm->state |= ALARMTIMER_STATE_ENQUEUED;
 }
@@ -271,7 +193,6 @@ static enum hrtimer_restart alarmtimer_fired(struct hrtimer *timer)
 		ret = HRTIMER_RESTART;
 	}
 	spin_unlock_irqrestore(&base->lock, flags);
-	alarm_fired = true;
 
 	return ret;
 
@@ -402,10 +323,6 @@ void alarm_init(struct alarm *alarm, enum alarmtimer_type type,
 	alarm->timer.function = alarmtimer_fired;
 	alarm->function = function;
 	alarm->type = type;
-	if (type >= ALARM_NUMTYPE) {
-		/* use ALARM_BOOTTIME as the default */
-		alarm->type = ALARM_BOOTTIME;
-	}
 	alarm->state = ALARMTIMER_STATE_INACTIVE;
 }
 EXPORT_SYMBOL_GPL(alarm_init);
@@ -627,7 +544,7 @@ static int alarm_timer_create(struct k_itimer *new_timer)
 	enum  alarmtimer_type type;
 
 	if (!alarmtimer_get_rtcdev())
-		return -ENOTSUPP;
+		return -EOPNOTSUPP;
 
 	if (!capable(CAP_WAKE_ALARM))
 		return -EPERM;
@@ -669,7 +586,7 @@ static void alarm_timer_get(struct k_itimer *timr,
 static int alarm_timer_del(struct k_itimer *timr)
 {
 	if (!rtcdev)
-		return -ENOTSUPP;
+		return -EOPNOTSUPP;
 
 	if (alarm_try_to_cancel(&timr->it.alarm.alarmtimer) < 0)
 		return TIMER_RETRY;
@@ -693,7 +610,7 @@ static int alarm_timer_set(struct k_itimer *timr, int flags,
 	ktime_t exp;
 
 	if (!rtcdev)
-		return -ENOTSUPP;
+		return -EOPNOTSUPP;
 
 	if (flags & ~TIMER_ABSTIME)
 		return -EINVAL;
@@ -855,7 +772,7 @@ static int alarm_timer_nsleep(const clockid_t which_clock, int flags,
 	struct restart_block *restart;
 
 	if (!alarmtimer_get_rtcdev())
-		return -ENOTSUPP;
+		return -EOPNOTSUPP;
 
 	if (flags & ~TIMER_ABSTIME)
 		return -EINVAL;
@@ -892,10 +809,10 @@ static int alarm_timer_nsleep(const clockid_t which_clock, int flags,
 	}
 
 	restart = &current->restart_block;
-	restart->fn = alarm_timer_nsleep_restart;
 	restart->nanosleep.clockid = type;
 	restart->nanosleep.expires = exp.tv64;
 	restart->nanosleep.rmtp = rmtp;
+	set_restart_fn(restart, alarm_timer_nsleep_restart);
 	ret = -ERESTART_RESTARTBLOCK;
 
 out:
@@ -915,51 +832,6 @@ static struct platform_driver alarmtimer_driver = {
 		.pm = &alarmtimer_pm_ops,
 	}
 };
-#ifdef ENABLE_ALARMTIMER_RECORD
-static int alarmtimer_seq_show(struct seq_file *seq, void *v)
-{
-	struct rtc_time tm;
-	int i = 0;
-
-	spin_lock(&alarmtimer_lock);
-	if (alarmtimer_num < ALARMTIMER_RECORD_MAX) {
-		for (i = 0; i < alarmtimer_num; i++) {
-			rtc_time_to_tm(alarmtimer_set_record_buff[i].alarmtimer_set_time.tv_sec, &tm);
-			seq_printf(seq, "%d-%02d-%02d %02d:%02d:%02d UTC - Alarmtimer { %s }\n",
-					tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec,
-					alarmtimer_set_record_buff[i].alarmtimer_set_msg);
-		}
-	} else {
-		for (i = index_head; i < ALARMTIMER_RECORD_MAX; i++) {
-			rtc_time_to_tm(alarmtimer_set_record_buff[i].alarmtimer_set_time.tv_sec, &tm);
-			seq_printf(seq, "%d-%02d-%02d %02d:%02d:%02d UTC - Alarmtimer { %s }\n",
-					tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec,
-					alarmtimer_set_record_buff[i].alarmtimer_set_msg);
-		}
-
-		for (i = 0; i<= index_tail; i++) {
-			rtc_time_to_tm(alarmtimer_set_record_buff[i].alarmtimer_set_time.tv_sec, &tm);
-			seq_printf(seq, "%d-%02d-%02d %02d:%02d:%02d UTC - Alarmtimer { %s }\n",
-					tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec,
-					alarmtimer_set_record_buff[i].alarmtimer_set_msg);
-		}
-	}
-	spin_unlock(&alarmtimer_lock);
-	return 0;
-}
-
-static int alarmtimer_record_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, alarmtimer_seq_show, NULL);
-}
-
-static const struct file_operations alarmtimer_records_fileops = {
-	.open           = alarmtimer_record_open,
-	.read           = seq_read,
-	.llseek         = seq_lseek,
-	.release        = single_release,
-};
-#endif
 
 /**
  * alarmtimer_init - Initialize alarm timer code
@@ -981,9 +853,6 @@ static int __init alarmtimer_init(void)
 		.timer_get	= alarm_timer_get,
 		.nsleep		= alarm_timer_nsleep,
 	};
-#ifdef ENABLE_ALARMTIMER_RECORD
-	struct proc_dir_entry *entry;
-#endif
 
 	alarmtimer_rtc_timer_init();
 
@@ -1014,12 +883,6 @@ static int __init alarmtimer_init(void)
 		goto out_drv;
 	}
 	ws = wakeup_source_register("alarmtimer");
-
-#ifdef ENABLE_ALARMTIMER_RECORD
-	entry = proc_create("alarmtimer_records", 0, NULL, &alarmtimer_records_fileops);
-	if (!entry)
-		printk(KERN_ERR "kobject_uevent: unable to create uevents_records!\n");
-#endif
 	return 0;
 
 out_drv:

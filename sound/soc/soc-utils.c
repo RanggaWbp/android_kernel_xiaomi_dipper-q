@@ -139,9 +139,6 @@ static int snd_soc_dummy_probe(struct platform_device *pdev)
 {
 	int ret;
 
-	memset(&dummy_codec, 0,
-		sizeof(struct snd_soc_codec_driver));
-
 	ret = snd_soc_register_codec(&pdev->dev, &dummy_codec, &dummy_dai, 1);
 	if (ret < 0)
 		return ret;
@@ -189,7 +186,7 @@ int __init snd_soc_util_init(void)
 	return ret;
 }
 
-void __exit snd_soc_util_exit(void)
+void snd_soc_util_exit(void)
 {
 	platform_device_unregister(soc_dummy_dev);
 	platform_driver_unregister(&soc_dummy_driver);

@@ -25,6 +25,13 @@
 #include <linux/vmalloc.h>
 #include "kexec_internal.h"
 
+/*
+ * Declare these symbols weak so that if architecture provides a purgatory,
+ * these will be overridden.
+ */
+char __weak kexec_purgatory[0];
+size_t __weak kexec_purgatory_size = 0;
+
 static int kexec_calculate_store_digests(struct kimage *image);
 
 /* Architectures can provide this probe function */
@@ -51,24 +58,6 @@ int __weak arch_kexec_kernel_verify_sig(struct kimage *image, void *buf,
 	return -EKEYREJECTED;
 }
 #endif
-
-/* Apply relocations of type RELA */
-int __weak
-arch_kexec_apply_relocations_add(const Elf_Ehdr *ehdr, Elf_Shdr *sechdrs,
-				 unsigned int relsec)
-{
-	pr_err("RELA relocation unsupported.\n");
-	return -ENOEXEC;
-}
-
-/* Apply relocations of type REL */
-int __weak
-arch_kexec_apply_relocations(const Elf_Ehdr *ehdr, Elf_Shdr *sechdrs,
-			     unsigned int relsec)
-{
-	pr_err("REL relocation unsupported.\n");
-	return -ENOEXEC;
-}
 
 /*
  * Free up memory used by kernel, initrd, and command line. This is temporary
@@ -521,8 +510,10 @@ static int kexec_calculate_store_digests(struct kimage *image)
 
 	sha_region_sz = KEXEC_SEGMENT_MAX * sizeof(struct kexec_sha_region);
 	sha_regions = vzalloc(sha_region_sz);
-	if (!sha_regions)
+	if (!sha_regions) {
+		ret = -ENOMEM;
 		goto out_free_desc;
+	}
 
 	desc->tfm   = tfm;
 	desc->flags = 0;

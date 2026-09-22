@@ -78,7 +78,8 @@ static DEFINE_RWLOCK(policy_rwlock);
 
 static struct sidtab sidtab;
 struct policydb policydb;
-int ss_initialized __aligned(0x1000) __attribute__((section(".bss_rtic")));
+int ss_initialized;
+
 /*
  * The largest sequence number that has been used when
  * providing an access decision to the access vector cache.
@@ -2615,8 +2616,12 @@ err:
 	if (*names) {
 		for (i = 0; i < *len; i++)
 			kfree((*names)[i]);
+		kfree(*names);
 	}
 	kfree(*values);
+	*len = 0;
+	*names = NULL;
+	*values = NULL;
 	goto out;
 }
 

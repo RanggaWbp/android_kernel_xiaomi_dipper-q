@@ -419,7 +419,13 @@ EXPORT_SYMBOL(drm_invalid_op);
  */
 static int drm_copy_field(char __user *buf, size_t *buf_len, const char *value)
 {
-	int len;
+	size_t len;
+
+	/* don't attempt to copy a NULL pointer */
+	if (WARN_ONCE(!value, "BUG: the value to copy was not set!")) {
+		*buf_len = 0;
+		return 0;
+	}
 
 	/* don't overflow userbuf */
 	len = strlen(value);
@@ -469,29 +475,6 @@ static int drm_version(struct drm_device *dev, void *data,
 	return err;
 }
 
-#define MAX_TASK_NAME_LEN 30
-#define MAX_LIST_NUM 4
-char support_list[MAX_LIST_NUM][MAX_TASK_NAME_LEN] = {
-		"displayfeature",
-		"DisplayFeature",
-		"disp_pcc"
-		"displayeffect"
-};
-
-static bool drm_master_filter(char *task_name)
-{
-	unsigned int i = 0;
-	bool ret = false;
-	//pr_debug("%s task_name:%s \n", __func__, task_name);
-	for (i=0; i<MAX_LIST_NUM; i++) {
-		//pr_debug("task_name:%s support:%s i:%d size:%zu\n", task_name, support_list[i], i, strlen(support_list[i]));
-		if (!strncmp(task_name, support_list[i], strlen(support_list[i]))) {
-			ret = true;
-			break;
-		}
-	}
-	return ret;
-}
 /*
  * drm_ioctl_permit - Check ioctl permissions against caller
  *
@@ -504,7 +487,6 @@ static bool drm_master_filter(char *task_name)
  */
 int drm_ioctl_permit(u32 flags, struct drm_file *file_priv)
 {
-	struct task_struct *task = get_current();
 	/* ROOT_ONLY is only for CAP_SYS_ADMIN */
 	if (unlikely((flags & DRM_ROOT_ONLY) && !capable(CAP_SYS_ADMIN)))
 		return -EACCES;
@@ -517,11 +499,8 @@ int drm_ioctl_permit(u32 flags, struct drm_file *file_priv)
 	/* MASTER is only for master or control clients */
 	if (unlikely((flags & DRM_MASTER) && 
 		     !drm_is_current_master(file_priv) &&
-		     !drm_is_control_client(file_priv))) {
-		if (!drm_master_filter(task->comm)) {
-			return -EACCES;
-		}
-	}
+		     !drm_is_control_client(file_priv)))
+		return -EACCES;
 
 	/* Control clients must be explicitly allowed */
 	if (unlikely(!(flags & DRM_CONTROL_ALLOW) &&

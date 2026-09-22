@@ -1,6 +1,5 @@
 /*
  * Copyright (C) 2001 Jens Axboe <axboe@kernel.dk>
- * Copyright (C) 2019 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -274,8 +273,6 @@ static void bio_free(struct bio *bio)
 void bio_init(struct bio *bio)
 {
 	memset(bio, 0, sizeof(*bio));
-	bio->bi_status = BIO_INIT;
-	bio->bi_polling = false;
 	atomic_set(&bio->__bi_remaining, 1);
 	atomic_set(&bio->__bi_cnt, 1);
 }
@@ -568,18 +565,6 @@ inline int bio_phys_segments(struct request_queue *q, struct bio *bio)
 }
 EXPORT_SYMBOL(bio_phys_segments);
 
-static inline void bio_clone_crypt_key(struct bio *dst, const struct bio *src)
-{
-#ifdef CONFIG_PFK
-	dst->bi_iter.bi_dun = src->bi_iter.bi_dun;
-#ifdef CONFIG_DM_DEFAULT_KEY
-	dst->bi_crypt_key = src->bi_crypt_key;
-	dst->bi_crypt_skip = src->bi_crypt_skip;
-#endif
-	dst->bi_dio_inode = src->bi_dio_inode;
-#endif
-}
-
 /**
  * 	__bio_clone_fast - clone a bio that shares the original bio's biovec
  * 	@bio: destination bio
@@ -604,10 +589,7 @@ void __bio_clone_fast(struct bio *bio, struct bio *bio_src)
 	bio->bi_opf = bio_src->bi_opf;
 	bio->bi_iter = bio_src->bi_iter;
 	bio->bi_io_vec = bio_src->bi_io_vec;
-#ifdef CONFIG_PFK
-	bio->bi_dio_inode = bio_src->bi_dio_inode;
-#endif
-	bio_clone_crypt_key(bio, bio_src);
+
 	bio_clone_blkcg_association(bio, bio_src);
 }
 EXPORT_SYMBOL(__bio_clone_fast);
@@ -714,7 +696,6 @@ struct bio *bio_clone_bioset(struct bio *bio_src, gfp_t gfp_mask,
 		}
 	}
 
-	bio_clone_crypt_key(bio, bio_src);
 	bio_clone_blkcg_association(bio, bio_src);
 
 	return bio;
@@ -1557,7 +1538,7 @@ struct bio *bio_copy_kern(struct request_queue *q, void *data, unsigned int len,
 		if (bytes > len)
 			bytes = len;
 
-		page = alloc_page(q->bounce_gfp | gfp_mask);
+		page = alloc_page(q->bounce_gfp | __GFP_ZERO | gfp_mask);
 		if (!page)
 			goto cleanup;
 

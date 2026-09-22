@@ -72,23 +72,14 @@ ip6_packet_match(const struct sk_buff *skb,
 {
 	unsigned long ret;
 	const struct ipv6hdr *ipv6 = ipv6_hdr(skb);
-#if IS_ENABLED(IP6_NF_IPTABLES_128)
-	const __uint128_t *ulm1 = (const __uint128_t *)&ip6info->smsk;
-	const __uint128_t *ulm2 = (const __uint128_t *)&ip6info->dmsk;
-#endif
 
-#if IS_ENABLED(IP6_NF_IPTABLES_128)
-	if (*ulm1 || *ulm2)
-#endif
-	{
-		if (NF_INVF(ip6info, IP6T_INV_SRCIP,
-			    ipv6_masked_addr_cmp(&ipv6->saddr, &ip6info->smsk,
-						 &ip6info->src)) ||
-		    NF_INVF(ip6info, IP6T_INV_DSTIP,
-			    ipv6_masked_addr_cmp(&ipv6->daddr, &ip6info->dmsk,
-						 &ip6info->dst)))
-			return false;
-	}
+	if (NF_INVF(ip6info, IP6T_INV_SRCIP,
+		    ipv6_masked_addr_cmp(&ipv6->saddr, &ip6info->smsk,
+					 &ip6info->src)) ||
+	    NF_INVF(ip6info, IP6T_INV_DSTIP,
+		    ipv6_masked_addr_cmp(&ipv6->daddr, &ip6info->dmsk,
+					 &ip6info->dst)))
+		return false;
 
 	ret = ifname_compare_aligned(indev, ip6info->iniface, ip6info->iniface_mask);
 
@@ -299,6 +290,7 @@ ip6t_do_table(struct sk_buff *skb,
 	 * things we don't know, ie. tcp syn flag or ports).  If the
 	 * rule is also a fragment-specific rule, non-fragments won't
 	 * match it. */
+	acpar.fragoff = 0;
 	acpar.hotdrop = false;
 	acpar.net     = state->net;
 	acpar.in      = state->in;
@@ -1484,6 +1476,8 @@ translate_compat_table(struct net *net,
 	newinfo = xt_alloc_table_info(size);
 	if (!newinfo)
 		goto out_unlock;
+
+	memset(newinfo->entries, 0, size);
 
 	newinfo->number = compatr->num_entries;
 	for (i = 0; i < NF_INET_NUMHOOKS; i++) {

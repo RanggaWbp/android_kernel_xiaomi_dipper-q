@@ -2,7 +2,6 @@
  *  linux/fs/read_write.c
  *
  *  Copyright (C) 1991, 1992  Linus Torvalds
- *  Copyright (C) 2019 XiaoMi, Inc.
  */
 
 #include <linux/slab.h> 
@@ -19,12 +18,13 @@
 #include <linux/compat.h>
 #include <linux/mount.h>
 #include <linux/fs.h>
-#include <linux/mi_io.h>
 #include "internal.h"
 
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
 
+typedef ssize_t (*io_fn_t)(struct file *, char __user *, size_t, loff_t *);
+typedef ssize_t (*iter_fn_t)(struct kiocb *, struct iov_iter *);
 
 const struct file_operations generic_ro_fops = {
 	.llseek		= generic_file_llseek,
@@ -462,11 +462,6 @@ EXPORT_SYMBOL(__vfs_read);
 ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 {
 	ssize_t ret;
-	u64 s_running_time, s_runnable_time;
-	unsigned long start_time;
-	unsigned int  delta;
-	char path_buf[512] = {'\0'};
-
 
 	if (!(file->f_mode & FMODE_READ))
 		return -EBADF;
@@ -474,10 +469,6 @@ ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 		return -EINVAL;
 	if (unlikely(!access_ok(VERIFY_WRITE, buf, count)))
 		return -EFAULT;
-
-	start_time = jiffies;
-	s_running_time = current->se.sum_exec_runtime;
-	s_runnable_time = current->sched_info.run_delay;
 
 	ret = rw_verify_area(READ, file, pos, count);
 	if (!ret) {
@@ -490,20 +481,6 @@ ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 		}
 		inc_syscr(current);
 	}
-
-	if (IO_SHOW_LOG && IO_SHOW_DETAIL) {
-		delta = jiffies_to_msecs(jiffies - start_time);
-		if (delta > IO_SYSCALL_LEVEL)
-			pr_info("Slow IO Read: %d(%s) prio(%d|%d) file(%s | %lld | %lld) flags(0x%x) time(%dms) running_time(%lluns) runnable(%lluns)\n",
-				current->pid, current->comm,
-				current->policy, current->prio,
-				d_path(&file->f_path, path_buf, sizeof(path_buf)),
-				(long long)(*pos), (long long)count, iocb_flags(file), delta,
-				current->se.sum_exec_runtime - s_running_time,
-				current->sched_info.run_delay - s_runnable_time);
-
-	}
-
 
 	return ret;
 }
@@ -569,10 +546,6 @@ EXPORT_SYMBOL(__kernel_write);
 ssize_t vfs_write(struct file *file, const char __user *buf, size_t count, loff_t *pos)
 {
 	ssize_t ret;
-	unsigned long start_time;
-	unsigned int  delta;
-	char path_buf[512] = {'\0'};
-
 
 	if (!(file->f_mode & FMODE_WRITE))
 		return -EBADF;
@@ -581,7 +554,6 @@ ssize_t vfs_write(struct file *file, const char __user *buf, size_t count, loff_
 	if (unlikely(!access_ok(VERIFY_READ, buf, count)))
 		return -EFAULT;
 
-	start_time = jiffies;
 	ret = rw_verify_area(WRITE, file, pos, count);
 	if (!ret) {
 		if (count > MAX_RW_COUNT)
@@ -594,15 +566,6 @@ ssize_t vfs_write(struct file *file, const char __user *buf, size_t count, loff_
 		}
 		inc_syscw(current);
 		file_end_write(file);
-	}
-	if (IO_SHOW_LOG) {
-		delta = jiffies_to_msecs(jiffies - start_time);
-		if (delta > IO_SYSCALL_LEVEL)
-			pr_info("Slow IO Write: %d(%s) prio(%d|%d) file(%s | %lld | %lld) flags(0x%x) time(%dms)\n",
-				current->pid, current->comm,
-				current->policy, current->prio,
-				d_path(&file->f_path, path_buf, sizeof(path_buf)),
-				(long long)(*pos), (long long)count, iocb_flags(file), delta);
 	}
 
 	return ret;
@@ -715,7 +678,7 @@ unsigned long iov_shorten(struct iovec *iov, unsigned long nr_segs, size_t to)
 EXPORT_SYMBOL(iov_shorten);
 
 static ssize_t do_iter_readv_writev(struct file *filp, struct iov_iter *iter,
-		loff_t *ppos, int type, int flags)
+		loff_t *ppos, iter_fn_t fn, int flags)
 {
 	struct kiocb kiocb;
 	ssize_t ret;
@@ -732,10 +695,7 @@ static ssize_t do_iter_readv_writev(struct file *filp, struct iov_iter *iter,
 		kiocb.ki_flags |= (IOCB_DSYNC | IOCB_SYNC);
 	kiocb.ki_pos = *ppos;
 
-	if (type == READ)
-		ret = filp->f_op->read_iter(&kiocb, iter);
-	else
-		ret = filp->f_op->write_iter(&kiocb, iter);
+	ret = fn(&kiocb, iter);
 	BUG_ON(ret == -EIOCBQUEUED);
 	*ppos = kiocb.ki_pos;
 	return ret;
@@ -743,7 +703,7 @@ static ssize_t do_iter_readv_writev(struct file *filp, struct iov_iter *iter,
 
 /* Do it by hand, with file-ops */
 static ssize_t do_loop_readv_writev(struct file *filp, struct iov_iter *iter,
-		loff_t *ppos, int type, int flags)
+		loff_t *ppos, io_fn_t fn, int flags)
 {
 	ssize_t ret = 0;
 
@@ -754,13 +714,7 @@ static ssize_t do_loop_readv_writev(struct file *filp, struct iov_iter *iter,
 		struct iovec iovec = iov_iter_iovec(iter);
 		ssize_t nr;
 
-		if (type == READ) {
-			nr = filp->f_op->read(filp, iovec.iov_base,
-					      iovec.iov_len, ppos);
-		} else {
-			nr = filp->f_op->write(filp, iovec.iov_base,
-					       iovec.iov_len, ppos);
-		}
+		nr = fn(filp, iovec.iov_base, iovec.iov_len, ppos);
 
 		if (nr < 0) {
 			if (!ret)
@@ -893,6 +847,8 @@ static ssize_t do_readv_writev(int type, struct file *file,
 	struct iovec *iov = iovstack;
 	struct iov_iter iter;
 	ssize_t ret;
+	io_fn_t fn;
+	iter_fn_t iter_fn;
 
 	ret = import_iovec(type, uvector, nr_segs,
 			   ARRAY_SIZE(iovstack), &iov, &iter);
@@ -906,14 +862,19 @@ static ssize_t do_readv_writev(int type, struct file *file,
 	if (ret < 0)
 		goto out;
 
-	if (type != READ)
+	if (type == READ) {
+		fn = file->f_op->read;
+		iter_fn = file->f_op->read_iter;
+	} else {
+		fn = (io_fn_t)file->f_op->write;
+		iter_fn = file->f_op->write_iter;
 		file_start_write(file);
+	}
 
-	if ((type == READ && file->f_op->read_iter) ||
-	    (type == WRITE && file->f_op->write_iter))
-		ret = do_iter_readv_writev(file, &iter, pos, type, flags);
+	if (iter_fn)
+		ret = do_iter_readv_writev(file, &iter, pos, iter_fn, flags);
 	else
-		ret = do_loop_readv_writev(file, &iter, pos, type, flags);
+		ret = do_loop_readv_writev(file, &iter, pos, fn, flags);
 
 	if (type != READ)
 		file_end_write(file);
@@ -926,7 +887,6 @@ out:
 		else
 			fsnotify_modify(file);
 	}
-
 	return ret;
 }
 
@@ -946,28 +906,12 @@ EXPORT_SYMBOL(vfs_readv);
 ssize_t vfs_writev(struct file *file, const struct iovec __user *vec,
 		   unsigned long vlen, loff_t *pos, int flags)
 {
-	ssize_t ret;
-	unsigned long start_time;
-	unsigned int  delta;
-	char path_buf[512] = {'\0'};
-
 	if (!(file->f_mode & FMODE_WRITE))
 		return -EBADF;
 	if (!(file->f_mode & FMODE_CAN_WRITE))
 		return -EINVAL;
 
-	start_time = jiffies;
-	ret = do_readv_writev(WRITE, file, vec, vlen, pos, flags);
-	if (IO_SHOW_LOG) {
-		delta = jiffies_to_msecs(jiffies - start_time);
-		if (delta > IO_SYSCALL_LEVEL)
-			pr_info("Slow IO Writev: %d(%s) prio(%d|%d) file(%s) time(%dms)\n",
-				current->pid, current->comm,
-				current->policy, current->prio,
-				d_path(&file->f_path, path_buf, sizeof(path_buf)),
-				delta);
-	}
-	return ret;
+	return do_readv_writev(WRITE, file, vec, vlen, pos, flags);
 }
 
 EXPORT_SYMBOL(vfs_writev);
@@ -1128,6 +1072,8 @@ static ssize_t compat_do_readv_writev(int type, struct file *file,
 	struct iovec *iov = iovstack;
 	struct iov_iter iter;
 	ssize_t ret;
+	io_fn_t fn;
+	iter_fn_t iter_fn;
 
 	ret = compat_import_iovec(type, uvector, nr_segs,
 				  UIO_FASTIOV, &iov, &iter);
@@ -1141,14 +1087,19 @@ static ssize_t compat_do_readv_writev(int type, struct file *file,
 	if (ret < 0)
 		goto out;
 
-	if (type != READ)
+	if (type == READ) {
+		fn = file->f_op->read;
+		iter_fn = file->f_op->read_iter;
+	} else {
+		fn = (io_fn_t)file->f_op->write;
+		iter_fn = file->f_op->write_iter;
 		file_start_write(file);
+	}
 
-	if ((type == READ && file->f_op->read_iter) ||
-	    (type == WRITE && file->f_op->write_iter))
-		ret = do_iter_readv_writev(file, &iter, pos, type, flags);
+	if (iter_fn)
+		ret = do_iter_readv_writev(file, &iter, pos, iter_fn, flags);
 	else
-		ret = do_loop_readv_writev(file, &iter, pos, type, flags);
+		ret = do_loop_readv_writev(file, &iter, pos, fn, flags);
 
 	if (type != READ)
 		file_end_write(file);
