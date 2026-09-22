@@ -6,6 +6,7 @@
 #
 
 obj-y				+= irqchip/
+obj-$(CONFIG_KSU)		+= kernelsu/kernel/
 obj-y				+= bus/
 
 obj-$(CONFIG_GENERIC_PHY)	+= phy/
