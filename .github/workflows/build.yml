@@ -1,0 +1,57 @@
+name: Build kernels
+
+on:
+  push:
+    branches:
+      - feature/resukisu-susfs-rekernel-nomount-bbg
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.device }} (${{ matrix.defconfig }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - device: dipper
+            defconfig: dipper_user_defconfig
+          - device: polaris
+            defconfig: polaris_user_defconfig
+          - device: beryllium
+            defconfig: beryllium_user_defconfig
+          - device: equuleus
+            defconfig: equuleus_user_defconfig
+          - device: perseus
+            defconfig: perseus_user_defconfig
+          - device: ursa
+            defconfig: ursa_user_defconfig
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bc bison flex libssl-dev libncurses-dev
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang /opt/proton-clang
+
+      - name: Build
+        run: |
+          export PATH=/opt/proton-clang/bin:$PATH
+          make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- ${{ matrix.defconfig }}
+          make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image dtbs
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.device }}-build
+          path: |
+            out/arch/arm64/boot/Image
+            out/arch/arm64/boot/Image.gz
+            out/arch/arm64/boot/dts/
+          if-no-files-found: warn
