@@ -89,6 +89,11 @@ jobs:
           cd AnyKernel3
           sed -i "s/device.name1=.*/device.name1=${{ matrix.device }}/" anykernel.sh
           sed -i "s/device.name2=.*/device.name2=${{ matrix.device }}${{ matrix.device == 'ursa' && '-mi8937' || '' }}/" anykernel.sh
+          # AnyKernel3's stock template ships a placeholder OMAP boot path (BLOCK=...omap_hsmmc.0...)
+          # which does not exist on real hardware. All these SDM845 Xiaomi/Poco devices are
+          # non-A/B and use the standard bootdevice-by-name boot partition.
+          sed -i "s#^BLOCK=.*#BLOCK=/dev/block/bootdevice/by-name/boot;#" anykernel.sh
+          sed -i "s/^IS_SLOT_DEVICE=.*/IS_SLOT_DEVICE=0;/" anykernel.sh
           kernelrelease_dir="$(find "../out/${{ matrix.device }}/modules_out/lib/modules" -mindepth 1 -maxdepth 1 -type d -print -quit)"
           if [ -n "$kernelrelease_dir" ] && [ -n "$(find "$kernelrelease_dir" -name '*.ko' -print -quit)" ]; then
             kr="$(basename "$kernelrelease_dir")"
