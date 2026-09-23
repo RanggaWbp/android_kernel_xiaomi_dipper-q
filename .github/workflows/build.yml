@@ -68,3 +68,16 @@ jobs:
           path: |
             out/releases/${{ matrix.device }}/*/
           if-no-files-found: warn
+
+      - name: Create GitHub Release
+        if: success() && github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ matrix.device }}-${{ github.run_number }}-${{ github.sha }}
+          name: ${{ matrix.device }} - ${{ github.run_number }} - ${{ github.sha }}
+          body_path: out/releases/${{ matrix.device }}/*/*.md
+          files: out/releases/${{ matrix.device }}/*/*.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
