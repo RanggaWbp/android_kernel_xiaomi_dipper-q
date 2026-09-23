@@ -271,14 +271,31 @@ package_device() {
 }
 
 main() {
-    log "Starting AnyKernel3 packaging for all devices"
+    # Parse CLI arguments for single-device mode (CI)
+    local single_device=""
+    local single_defconfig=""
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --device) single_device="$2"; shift 2 ;;
+            --defconfig) single_defconfig="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+
+    log "Starting AnyKernel3 packaging"
     log "Branch: $BRANCH_SHORT | Date: $BUILD_DATE | SHA: $GIT_SHORT_SHA"
 
-    for i in "${!DEVICES[@]}"; do
-        device="${DEVICES[$i]}"
-        defconfig="${DEFCONFIGS[$i]}"
-        package_device "$device" "$defconfig" || err "Device $device failed, continuing..."
-    done
+    if [[ -n "$single_device" && -n "$single_defconfig" ]]; then
+        # CI single-device mode
+        package_device "$single_device" "$single_defconfig"
+    else
+        # Local multi-device mode
+        for i in "${!DEVICES[@]}"; do
+            device="${DEVICES[$i]}"
+            defconfig="${DEFCONFIGS[$i]}"
+            package_device "$device" "$defconfig" || err "Device $device failed, continuing..."
+        done
+    fi
 
     log "All devices processed. Release directory: $OUT_RELEASES_DIR"
     find "$OUT_RELEASES_DIR" -name "*.zip" -o -name "*.md" | sort

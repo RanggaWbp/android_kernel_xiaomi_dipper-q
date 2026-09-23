@@ -42,16 +42,20 @@ jobs:
       - name: Build
         run: |
           export PATH=/opt/proton-clang/bin:$PATH
-          make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- ${{ matrix.defconfig }}
-          make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image dtbs
+          make O=out/${{ matrix.device }} ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- ${{ matrix.defconfig }}
+          make O=out/${{ matrix.device }} ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image dtbs
 
-      - name: Upload artifacts
-        if: always()
+      - name: Package AnyKernel3 ZIP
+        if: success()
+        run: |
+          chmod +x package_anykernel3.sh
+          ./package_anykernel3.sh --device ${{ matrix.device }} --defconfig ${{ matrix.defconfig }}
+
+      - name: Upload AnyKernel3 release
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.device }}-build
+          name: ${{ matrix.device }}-anykernel3
           path: |
-            out/arch/arm64/boot/Image
-            out/arch/arm64/boot/Image.gz
-            out/arch/arm64/boot/dts/
+            out/releases/${{ matrix.device }}/*/
           if-no-files-found: warn
