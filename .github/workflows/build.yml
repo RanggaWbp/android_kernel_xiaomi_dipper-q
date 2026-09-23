@@ -19,16 +19,22 @@ jobs:
         include:
           - device: dipper
             defconfig: dipper_user_defconfig
+            dtb: dipper-mp-v2.1.dtb
           - device: polaris
             defconfig: polaris_user_defconfig
+            dtb: polaris-mp-v2.1.dtb
           - device: beryllium
             defconfig: beryllium_user_defconfig
+            dtb: beryllium-mp-v2.1.dtb
           - device: equuleus
             defconfig: equuleus_user_defconfig
+            dtb: equuleus-mp-v2.1.dtb
           - device: perseus
             defconfig: perseus_user_defconfig
+            dtb: perseus-mp-v2.1.dtb
           - device: ursa
             defconfig: ursa_user_defconfig
+            dtb: ursa-mp-v2.1.dtb
 
     steps:
       - name: Checkout
@@ -46,51 +52,51 @@ jobs:
         run: |
           export PATH=/opt/proton-clang/bin:$PATH
           make O=out/${{ matrix.device }} ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- ${{ matrix.defconfig }}
-          make O=out/${{ matrix.device }} ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image.gz dtbs
-          # Try to build Image.gz-dtb directly (kernel build system handles DTB appending if CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y)
-          make O=out/${{ matrix.device }} ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- Image.gz-dtb 2>/dev/null || true
-          # Fallback: manually append device DTB if Image.gz-dtb not created
-          if [ ! -f out/${{ matrix.device }}/arch/arm64/boot/Image.gz-dtb ]; then
-            dtb_file=$(find out/${{ matrix.device }}/arch/arm64/boot/dts/qcom -name "${{ matrix.device }}*.dtb" | head -1)
-            if [ -n "$dtb_file" ] && [ -f out/${{ matrix.device }}/arch/arm64/boot/Image.gz ]; then
-              cat out/${{ matrix.device }}/arch/arm64/boot/Image.gz "$dtb_file" > out/${{ matrix.device }}/arch/arm64/boot/Image.gz-dtb
-            fi
-          fi
+          make O=out/${{ matrix.device }} ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc)
+          # Build Image.gz-dtb via kernel build system (requires CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y)
+          make O=out/${{ matrix.device }} ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- Image.gz-dtb
 
-      - name: Package AnyKernel3 ZIP
-        if: success()
+      - name: Prepare AnyKernel3
         run: |
-          chmod +x package_anykernel3.sh
-          ./package_anykernel3.sh --device ${{ matrix.device }} --defconfig ${{ matrix.defconfig }}
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 AnyKernel3
+          cp out/${{ matrix.device }}/arch/arm64/boot/Image.gz-dtb AnyKernel3/Image.gz-dtb
+          cd AnyKernel3
+          sed -i "s/device.name1=.*/device.name1=${{ matrix.device }}/" anykernel.sh
+          sed -i "s/device.name2=.*/device.name2=${{ matrix.device }}${{ matrix.device == 'ursa' && '-mi8937' || '' }}/" anykernel.sh
+          zip -r9 ../${{ matrix.device }}-kernel.zip . -x ".git/*" "README.md" "*.zip"
 
-      - name: Upload AnyKernel3 release
-        if: success()
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.device }}-anykernel3
-          path: |
-            out/releases/${{ matrix.device }}/*/
-          if-no-files-found: warn
+          name: ${{ matrix.device }}-kernel-zip
+          path: ${{ matrix.device }}-kernel.zip
 
-      - name: Find release notes
-        if: success()
-        id: notes
-        shell: bash
-        run: |
-          notes=$(find "out/releases/${{ matrix.device }}" -type f -name '*.md' -print -quit)
-          if [ -n "$notes" ]; then
-            echo "path=$notes" >> "$GITHUB_OUTPUT"
-          fi
+  release:
+    name: Create Release
+    runs-on: ubuntu-22.04
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: false
 
-      - name: Create GitHub Release
-        if: success() && github.event_name != 'pull_request'
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ matrix.device }}-${{ github.run_number }}-${{ github.sha }}
-          name: ${{ matrix.device }} - ${{ github.run_number }} - ${{ github.sha }}
-          body_path: ${{ steps.notes.outputs.path }}
-          files: out/releases/${{ matrix.device }}/*/*.zip
-          draft: false
-          prerelease: false
+          tag_name: ${{ github.ref_name }}
+          name: Kernel Release ${{ github.ref_name }}
+          body: |
+            Kernel build for Xiaomi SDM660 devices (dipper, polaris, beryllium, equuleus, perseus, ursa)
+            Built with ReSukiSU + SUSFS + Re:Kernel + NoMount + Baseband-guard
+          files: |
+            artifacts/dipper-kernel-zip/dipper-kernel.zip
+            artifacts/polaris-kernel-zip/polaris-kernel.zip
+            artifacts/beryllium-kernel-zip/beryllium-kernel.zip
+            artifacts/equuleus-kernel-zip/equuleus-kernel.zip
+            artifacts/perseus-kernel-zip/perseus-kernel.zip
+            artifacts/ursa-kernel-zip/ursa-kernel.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
