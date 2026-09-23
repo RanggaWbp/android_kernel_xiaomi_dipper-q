@@ -50,12 +50,34 @@ jobs:
           git clone --depth=1 https://github.com/kdrag0n/proton-clang /opt/proton-clang
 
       - name: Build
+        shell: bash
         run: |
+          set -euo pipefail
+
           export PATH=/opt/proton-clang/bin:$PATH
-          make O=out/${{ matrix.device }} ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- ${{ matrix.defconfig }}
-          make O=out/${{ matrix.device }} ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc)
-          # Build Image.gz-dtb via kernel build system (requires CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y)
-          make O=out/${{ matrix.device }} ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- Image.gz-dtb
+          export MAKE_ARGS="O=out/${{ matrix.device }} ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-"
+
+          make $MAKE_ARGS ${{ matrix.defconfig }}
+          make $MAKE_ARGS -j"$(nproc)"
+          make $MAKE_ARGS Image.gz
+          make $MAKE_ARGS dtbs
+
+          dtb_path="$(find \
+            "out/${{ matrix.device }}/arch/arm64/boot/dts" \
+            -type f \
+            -name '${{ matrix.dtb }}' \
+            -print -quit)"
+
+          if [ -z "$dtb_path" ]; then
+            echo "DTB not found: ${{ matrix.dtb }}"
+            find "out/${{ matrix.device }}/arch/arm64/boot/dts" -type f -name '*.dtb'
+            exit 1
+          fi
+
+          cat \
+            "out/${{ matrix.device }}/arch/arm64/boot/Image.gz" \
+            "$dtb_path" \
+            > "out/${{ matrix.device }}/arch/arm64/boot/Image.gz-dtb"
 
       - name: Prepare AnyKernel3
         run: |
