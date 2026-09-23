@@ -89,7 +89,7 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: Kernel Release ${{ github.ref_name }}
           body: |
-            Kernel build for Xiaomi SDM660 devices (dipper, polaris, beryllium, equuleus, perseus, ursa)
+            Kernel build for Xiaomi SDM845 devices (dipper, polaris, beryllium, equuleus, perseus, ursa)
             Built with ReSukiSU + SUSFS + Re:Kernel + NoMount + Baseband-guard
           files: |
             artifacts/dipper-kernel-zip/dipper-kernel.zip
