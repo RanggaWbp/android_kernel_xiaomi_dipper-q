@@ -6,6 +6,9 @@ on:
       - feature/resukisu-susfs-rekernel-nomount-bbg
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: ${{ matrix.device }} (${{ matrix.defconfig }})
@@ -69,13 +72,23 @@ jobs:
             out/releases/${{ matrix.device }}/*/
           if-no-files-found: warn
 
+      - name: Find release notes
+        if: success()
+        id: notes
+        shell: bash
+        run: |
+          notes=$(find "out/releases/${{ matrix.device }}" -type f -name '*.md' -print -quit)
+          if [ -n "$notes" ]; then
+            echo "path=$notes" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create GitHub Release
         if: success() && github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ matrix.device }}-${{ github.run_number }}-${{ github.sha }}
           name: ${{ matrix.device }} - ${{ github.run_number }} - ${{ github.sha }}
-          body_path: out/releases/${{ matrix.device }}/*/*.md
+          body_path: ${{ steps.notes.outputs.path }}
           files: out/releases/${{ matrix.device }}/*/*.zip
           draft: false
           prerelease: false
