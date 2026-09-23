@@ -43,7 +43,16 @@ jobs:
         run: |
           export PATH=/opt/proton-clang/bin:$PATH
           make O=out/${{ matrix.device }} ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- ${{ matrix.defconfig }}
-          make O=out/${{ matrix.device }} ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image dtbs
+          make O=out/${{ matrix.device }} ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image.gz dtbs
+          # Try to build Image.gz-dtb directly (kernel build system handles DTB appending if CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y)
+          make O=out/${{ matrix.device }} ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- Image.gz-dtb 2>/dev/null || true
+          # Fallback: manually append device DTB if Image.gz-dtb not created
+          if [ ! -f out/${{ matrix.device }}/arch/arm64/boot/Image.gz-dtb ]; then
+            dtb_file=$(find out/${{ matrix.device }}/arch/arm64/boot/dts/qcom -name "${{ matrix.device }}*.dtb" | head -1)
+            if [ -n "$dtb_file" ] && [ -f out/${{ matrix.device }}/arch/arm64/boot/Image.gz ]; then
+              cat out/${{ matrix.device }}/arch/arm64/boot/Image.gz "$dtb_file" > out/${{ matrix.device }}/arch/arm64/boot/Image.gz-dtb
+            fi
+          fi
 
       - name: Package AnyKernel3 ZIP
         if: success()
