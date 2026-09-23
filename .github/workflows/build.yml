@@ -46,7 +46,7 @@ jobs:
       - name: Setup dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq bc bison flex libssl-dev libncurses-dev
+          sudo apt-get install -y -qq bc bison flex libssl-dev libncurses-dev kmod
           git clone --depth=1 https://github.com/kdrag0n/proton-clang /opt/proton-clang
 
       - name: Build
@@ -61,6 +61,9 @@ jobs:
           make $MAKE_ARGS -j"$(nproc)"
           make $MAKE_ARGS Image.gz
           make $MAKE_ARGS dtbs
+          make $MAKE_ARGS modules_install \
+            INSTALL_MOD_PATH="$(pwd)/out/${{ matrix.device }}/modules_out" \
+            INSTALL_MOD_STRIP=1
 
           dtb_path="$(find \
             "out/${{ matrix.device }}/arch/arm64/boot/dts" \
@@ -86,6 +89,18 @@ jobs:
           cd AnyKernel3
           sed -i "s/device.name1=.*/device.name1=${{ matrix.device }}/" anykernel.sh
           sed -i "s/device.name2=.*/device.name2=${{ matrix.device }}${{ matrix.device == 'ursa' && '-mi8937' || '' }}/" anykernel.sh
+          kernelrelease_dir="$(find "../out/${{ matrix.device }}/modules_out/lib/modules" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          if [ -n "$kernelrelease_dir" ] && [ -n "$(find "$kernelrelease_dir" -name '*.ko' -print -quit)" ]; then
+            kr="$(basename "$kernelrelease_dir")"
+            rm -f modules/system/lib/modules/placeholder
+            rm -f "$kernelrelease_dir/build" "$kernelrelease_dir/source"
+            mkdir -p "modules/system/lib/modules/$kr"
+            cp -a "$kernelrelease_dir"/. "modules/system/lib/modules/$kr/"
+            sed -i 's/do.modules=0/do.modules=1/' anykernel.sh
+            echo "Modules bundled: $kr ($(find "$kernelrelease_dir" -name '*.ko' | wc -l) .ko files)"
+          else
+            echo "Tidak ada modul (.ko) terbangun, zip tanpa modules/"
+          fi
           zip -r9 ../${{ matrix.device }}-kernel.zip . -x ".git/*" "README.md" "*.zip"
 
       - name: Upload artifacts
@@ -98,7 +113,7 @@ jobs:
     name: Create Release
     runs-on: ubuntu-22.04
     needs: build
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    if: always() && needs.build.result == 'success'
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -109,11 +124,12 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: Kernel Release ${{ github.ref_name }}
+          tag_name: build-${{ github.run_number }}
+          name: Kernel Release #${{ github.run_number }}
           body: |
             Kernel build for Xiaomi SDM845 devices (dipper, polaris, beryllium, equuleus, perseus, ursa)
             Built with ReSukiSU + SUSFS + Re:Kernel + NoMount + Baseband-guard
+            Commit: ${{ github.sha }}
           files: |
             artifacts/dipper-kernel-zip/dipper-kernel.zip
             artifacts/polaris-kernel-zip/polaris-kernel.zip
