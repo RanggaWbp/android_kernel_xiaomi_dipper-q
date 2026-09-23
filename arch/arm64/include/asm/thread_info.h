@@ -68,6 +68,7 @@ struct thread_info {
  */
 register unsigned long current_stack_pointer asm ("sp");
 
+#ifndef CONFIG_THREAD_INFO_IN_TASK
 /*
  * how to get the thread information struct from C
  */
@@ -87,6 +88,7 @@ static inline struct thread_info *current_thread_info(void)
 
 	return (struct thread_info *)sp_el0;
 }
+#endif /* !CONFIG_THREAD_INFO_IN_TASK */
 
 #define thread_saved_pc(tsk)	\
 	((unsigned long)(tsk->thread.cpu_context.pc))
