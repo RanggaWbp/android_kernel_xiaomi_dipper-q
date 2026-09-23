@@ -23,6 +23,10 @@
 
 #include <linux/compiler.h>
 
+#ifndef __ASSEMBLY__
+#include <asm/current.h>
+#endif
+
 #ifdef CONFIG_ARM64_4K_PAGES
 #define THREAD_SIZE_ORDER	2
 #elif defined(CONFIG_ARM64_16K_PAGES)
